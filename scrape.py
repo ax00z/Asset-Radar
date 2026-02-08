@@ -26,17 +26,19 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ──────────────────────────────────────────────
 # 1. CONFIGURATION & ENDPOINTS
 # ──────────────────────────────────────────────
 
 # Toronto Police Service ArcGIS REST API endpoints
+# Auto Thefts — dedicated endpoint (not the MCI aggregate)
+# Bike Thefts — dedicated endpoint
 ENDPOINTS = {
     "auto": (
         "https://services.arcgis.com/S9th0jAJ7bqgIRjw/arcgis/rest/services/"
-        "Major_Crime_Indicators_Open_Data/FeatureServer/0/query"
+        "Auto_Theft_Open_Data/FeatureServer/0/query"
     ),
     "bike": (
         "https://services.arcgis.com/S9th0jAJ7bqgIRjw/arcgis/rest/services/"
@@ -62,24 +64,22 @@ REQUEST_TIMEOUT_SECONDS = 60
 # 2. FIELD MAPS  (cryptic API names → clean JSON keys)
 # ──────────────────────────────────────────────
 
-# Shared field mapping used in the Transform phase.
-# Left side = possible API column names (tried in order).
-# Right side = clean key written to the JSON output.
 FIELD_MAP = {
     "id_fields":            ["EVENT_UNIQUE_ID", "OBJECTID"],
     "date_field":           ["OCC_DATE", "REPORT_DATE"],
     "year_field":           ["OCC_YEAR"],
     "month_field":          ["OCC_MONTH"],
-    "day_field":            ["OCC_DAY"],
+    "day_field":            ["OCC_DAY", "OCC_DOW"],
     "hour_field":           ["OCC_HOUR"],
     "neighbourhood_fields": ["NEIGHBOURHOOD_158", "NEIGHBOURHOOD_140", "HOOD_158", "NEIGHBOURHOOD"],
     "premise_fields":       ["PREMISES_TYPE", "PREMISE_TYPE"],
     "lat_fields":           ["LAT_WGS84", "Y"],
     "lng_fields":           ["LONG_WGS84", "X"],
     "status_fields":        ["STATUS"],
+    "division_fields":      ["DIVISION"],
+    "location_fields":      ["LOCATION_TYPE"],
 }
 
-# Month name → number lookup
 MONTH_NAME_TO_NUM = {
     "January": 1, "February": 2, "March": 3, "April": 4,
     "May": 5, "June": 6, "July": 7, "August": 8,
@@ -111,7 +111,12 @@ def http_get_json(url, params):
                 if "error" in data:
                     code = data["error"].get("code", "?")
                     msg = data["error"].get("message", "Unknown API error")
-                    raise RuntimeError(f"ArcGIS error {code}: {msg}")
+                    details = data["error"].get("details", [])
+                    detail_str = "; ".join(str(d) for d in details) if details else ""
+                    full_msg = f"ArcGIS error {code}: {msg}"
+                    if detail_str:
+                        full_msg += f" [{detail_str}]"
+                    raise RuntimeError(full_msg)
 
                 return data
 
@@ -123,40 +128,80 @@ def http_get_json(url, params):
             else:
                 raise
 
+
+def discover_fields(endpoint_url):
+    """Query the endpoint with no results to discover available field names.
+    This helps us build correct WHERE clauses."""
+    try:
+        params = {
+            "where": "1=1",
+            "outFields": "*",
+            "f": "json",
+            "resultRecordCount": "1",
+            "resultOffset": "0",
+        }
+        data = http_get_json(endpoint_url, params)
+        features = data.get("features", [])
+        if features:
+            attrs = features[0].get("attributes", {})
+            return list(attrs.keys())
+        fields_meta = data.get("fields", [])
+        if fields_meta:
+            return [f["name"] for f in fields_meta]
+        return []
+    except Exception as exc:
+        print(f"  ⚠  Field discovery failed: {exc}")
+        return []
+
+
 # ──────────────────────────────────────────────
 # 4. EXTRACT — paginated fetch (no server-side sort!)
 # ──────────────────────────────────────────────
 
-def compute_cutoff_timestamp_ms():
-    """Return a Unix timestamp in milliseconds for TIME_WINDOW_MONTHS ago."""
-    cutoff = datetime.utcnow() - timedelta(days=TIME_WINDOW_MONTHS * 30)
-    return int(cutoff.timestamp() * 1000)
+def now_utc():
+    """Get current UTC time (timezone-aware)."""
+    return datetime.now(timezone.utc)
 
 
-def build_date_where_clause(theft_type):
-    """Build a WHERE clause filtering by date.
-    For 'auto' thefts we also filter MCI_CATEGORY."""
-    cutoff_ms = compute_cutoff_timestamp_ms()
-    cutoff_iso = (datetime.utcnow() - timedelta(days=TIME_WINDOW_MONTHS * 30)).strftime("%Y-%m-%d")
+def build_where_clauses(theft_type, available_fields):
+    """
+    Build a list of WHERE clause strategies to try, from most specific to broadest.
+    We inspect available_fields to avoid requesting columns that don't exist.
+    """
+    cutoff_dt = now_utc() - timedelta(days=TIME_WINDOW_MONTHS * 30)
+    cutoff_year = cutoff_dt.year
+    current_year = now_utc().year
 
-    if theft_type == "auto":
-        # Try with DATE literal first (most reliable for ArcGIS)
-        return (
-            f"MCI_CATEGORY='Auto Theft' AND OCC_DATE >= DATE '{cutoff_iso}'"
+    clauses = []
+
+    has_occ_year = "OCC_YEAR" in available_fields
+    has_occ_date = "OCC_DATE" in available_fields
+    has_report_date = "REPORT_DATE" in available_fields
+
+    # Strategy 1: OCC_YEAR filter (most reliable on ArcGIS)
+    if has_occ_year:
+        clauses.append(
+            (f"OCC_YEAR >= {cutoff_year}", f"year >= {cutoff_year}")
         )
-    else:
-        return f"OCC_DATE >= DATE '{cutoff_iso}'"
 
+    # Strategy 2: Try timestamp on OCC_DATE (epoch ms)
+    if has_occ_date:
+        cutoff_ms = int(cutoff_dt.timestamp() * 1000)
+        clauses.append(
+            (f"OCC_DATE >= {cutoff_ms}", f"OCC_DATE epoch >= {cutoff_ms}")
+        )
 
-def build_year_where_clause(theft_type):
-    """Fallback WHERE clause using OCC_YEAR (simpler, less likely to fail)."""
-    current_year = datetime.utcnow().year
-    cutoff_year = current_year - 1  # at least last year + this year
+    # Strategy 3: Try timestamp on REPORT_DATE
+    if has_report_date:
+        cutoff_ms = int(cutoff_dt.timestamp() * 1000)
+        clauses.append(
+            (f"REPORT_DATE >= {cutoff_ms}", f"REPORT_DATE epoch >= {cutoff_ms}")
+        )
 
-    if theft_type == "auto":
-        return f"MCI_CATEGORY='Auto Theft' AND OCC_YEAR >= {cutoff_year}"
-    else:
-        return f"OCC_YEAR >= {cutoff_year}"
+    # Strategy 4: Super broad fallback — just get everything
+    clauses.append(("1=1", "unfiltered (all records)"))
+
+    return clauses
 
 
 def fetch_features(endpoint_url, theft_type):
@@ -164,70 +209,41 @@ def fetch_features(endpoint_url, theft_type):
     Download ALL matching features from an ArcGIS FeatureServer endpoint.
 
     Strategy:
-      1. Try filtering by exact date range.
-      2. If the API rejects the date filter (Error 400), fall back to
-         filtering by year.
+      1. Discover available fields first.
+      2. Try multiple WHERE clause strategies until one works.
       3. Paginate in batches of PAGE_SIZE using resultOffset.
       4. Do NOT ask the server to sort — sort in Python memory afterward.
 
-    Returns a list of raw feature dicts (each has 'attributes' and optionally 'geometry').
+    Returns a list of raw feature dicts.
     """
-
-    # --- Decide which WHERE clause to use ---
-    where_clause = build_date_where_clause(theft_type)
-    strategy = "date"
 
     print(f"\n{'='*60}")
     print(f"  Fetching: {theft_type.upper()} thefts")
-    print(f"  Endpoint: ...{endpoint_url[-50:]}")
-    print(f"  Strategy: {strategy} filter")
-    print(f"  WHERE:    {where_clause}")
-    print(f"{'='*60}")
+    print(f"  Endpoint: ...{endpoint_url.split('services/')[1][:60]}")
+
+    # Discover fields
+    print(f"  Discovering available fields...")
+    available_fields = discover_fields(endpoint_url)
+    if available_fields:
+        print(f"  Found {len(available_fields)} fields: {', '.join(available_fields[:10])}...")
+    else:
+        print(f"  ⚠  Could not discover fields, will try common patterns")
+        available_fields = ["OCC_YEAR", "OCC_DATE", "REPORT_DATE"]  # guess
+
+    # Build WHERE clause strategies
+    where_strategies = build_where_clauses(theft_type, available_fields)
 
     all_features = []
-    offset = 0
 
-    try:
-        while True:
-            params = {
-                "where": where_clause,
-                "outFields": "*",
-                "outSR": "4326",
-                "f": "json",
-                "resultRecordCount": str(PAGE_SIZE),
-                "resultOffset": str(offset),
-                # ⚠ CRITICAL: No "orderByFields" parameter!
-                # The ArcGIS server often returns "Invalid Query" (400)
-                # when asked to sort large datasets.  We sort in Python instead.
-            }
+    for where_clause, description in where_strategies:
+        print(f"\n  Strategy: {description}")
+        print(f"  WHERE:    {where_clause}")
 
-            print(f"  📥 Page {offset // PAGE_SIZE + 1} (offset={offset})...", end=" ", flush=True)
-            data = http_get_json(endpoint_url, params)
-            features = data.get("features", [])
-            count = len(features)
-            print(f"got {count} records")
+        all_features = []
+        offset = 0
+        success = True
 
-            if count == 0:
-                break
-
-            all_features.extend(features)
-            offset += PAGE_SIZE
-
-            # ArcGIS signals "no more pages" when exceededTransferLimit is False
-            # or when fewer results than PAGE_SIZE are returned.
-            if not data.get("exceededTransferLimit", False) and count < PAGE_SIZE:
-                break
-
-    except Exception as exc:
-        if strategy == "date":
-            # ── FALLBACK: retry with year-based filter ──
-            print(f"\n  ⚠  Date filter failed ({exc}), falling back to YEAR filter...")
-            where_clause = build_year_where_clause(theft_type)
-            strategy = "year"
-            print(f"  WHERE:    {where_clause}")
-            all_features = []
-            offset = 0
-
+        try:
             while True:
                 params = {
                     "where": where_clause,
@@ -236,9 +252,13 @@ def fetch_features(endpoint_url, theft_type):
                     "f": "json",
                     "resultRecordCount": str(PAGE_SIZE),
                     "resultOffset": str(offset),
+                    # ⚠ CRITICAL: No "orderByFields" parameter!
+                    # The ArcGIS server often returns "Invalid Query" (400)
+                    # when asked to sort large datasets.
                 }
 
-                print(f"  📥 Page {offset // PAGE_SIZE + 1} (offset={offset})...", end=" ", flush=True)
+                page_num = offset // PAGE_SIZE + 1
+                print(f"  📥 Page {page_num} (offset={offset})...", end=" ", flush=True)
                 data = http_get_json(endpoint_url, params)
                 features = data.get("features", [])
                 count = len(features)
@@ -250,30 +270,48 @@ def fetch_features(endpoint_url, theft_type):
                 all_features.extend(features)
                 offset += PAGE_SIZE
 
+                # Safety limit: don't download more than 100k records
+                if len(all_features) >= 100_000:
+                    print(f"  ⚠  Hit safety limit of 100k records, stopping pagination")
+                    break
+
+                # ArcGIS signals "no more pages" when exceededTransferLimit is absent/False
                 if not data.get("exceededTransferLimit", False) and count < PAGE_SIZE:
                     break
-        else:
-            raise
+
+            if len(all_features) > 0:
+                print(f"  ✅ Strategy '{description}' worked — got {len(all_features)} raw features")
+                break  # Success! Don't try other strategies
+            else:
+                print(f"  ⚠  Strategy returned 0 records, trying next...")
+                success = False
+
+        except Exception as exc:
+            print(f"\n  ⚠  Strategy '{description}' failed: {exc}")
+            success = False
+            continue
+
+    if not all_features:
+        print(f"\n  ❌ All strategies failed for {theft_type} — 0 features retrieved")
+        return []
 
     # ── SORT IN PYTHON MEMORY (newest first) ──
     def sort_key(feature):
         attrs = feature.get("attributes", {})
-        # Try epoch timestamp first (OCC_DATE is often milliseconds since epoch)
         occ_date = attrs.get("OCC_DATE") or attrs.get("REPORT_DATE")
         if isinstance(occ_date, (int, float)) and occ_date > 1_000_000_000:
-            return -occ_date  # negative for descending
-        # Fallback: compose from year/month/day
+            return -occ_date
         year = attrs.get("OCC_YEAR", 0) or 0
         month = attrs.get("OCC_MONTH", "")
         if isinstance(month, str):
             month = MONTH_NAME_TO_NUM.get(month, 0)
         day = attrs.get("OCC_DAY", 0) or 0
         hour = attrs.get("OCC_HOUR", 0) or 0
-        return -(year * 100000000 + month * 1000000 + day * 10000 + hour * 100)
+        return -(year * 100000000 + int(month or 0) * 1000000 + int(day or 0) * 10000 + int(hour or 0) * 100)
 
     all_features.sort(key=sort_key)
 
-    print(f"\n  ✅ Total {theft_type} features fetched: {len(all_features)}")
+    print(f"\n  ✅ Total {theft_type} features fetched & sorted: {len(all_features)}")
     return all_features
 
 # ──────────────────────────────────────────────
@@ -303,7 +341,7 @@ def parse_date_string(raw_date, year, month, day):
     # If OCC_DATE is epoch milliseconds, convert it
     if isinstance(raw_date, (int, float)) and raw_date > 1_000_000_000:
         try:
-            dt = datetime.utcfromtimestamp(raw_date / 1000.0)
+            dt = datetime.fromtimestamp(raw_date / 1000.0, tz=timezone.utc)
             return dt.strftime("%Y-%m-%d")
         except (OSError, ValueError):
             pass
@@ -316,7 +354,7 @@ def parse_date_string(raw_date, year, month, day):
     try:
         return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
     except (TypeError, ValueError):
-        return f"{datetime.utcnow().year}-01-01"
+        return f"{now_utc().year}-01-01"
 
 
 def process_features(raw_features, theft_type):
@@ -326,12 +364,18 @@ def process_features(raw_features, theft_type):
     Steps:
       - Rename cryptic columns to readable keys
       - Validate coordinates (discard 0,0 or null)
+      - Enforce 6-month time window (discard records outside window)
       - Tag each record as 'auto' or 'bike'
       - Return a list of clean dicts ready for JSON serialization
     """
 
+    cutoff_dt = now_utc() - timedelta(days=TIME_WINDOW_MONTHS * 30)
+    cutoff_year = cutoff_dt.year
+    cutoff_month = cutoff_dt.month
+
     clean_records = []
     discarded_coords = 0
+    discarded_date = 0
     discarded_other = 0
 
     for feature in raw_features:
@@ -339,7 +383,6 @@ def process_features(raw_features, theft_type):
         geometry = feature.get("geometry", {})
 
         # ── Extract coordinates ──
-        # Prefer geometry.y / geometry.x (proper GeoJSON), fall back to attribute fields
         lat = geometry.get("y") if geometry else None
         lng = geometry.get("x") if geometry else None
 
@@ -348,7 +391,6 @@ def process_features(raw_features, theft_type):
             lng = _first_of(attrs, FIELD_MAP["lng_fields"])
 
         # ── VALIDATION: discard invalid coordinates ──
-        # Records at (0, 0) are junk — they'd plot in the Gulf of Guinea
         try:
             lat = float(lat) if lat is not None else 0.0
             lng = float(lng) if lng is not None else 0.0
@@ -367,30 +409,38 @@ def process_features(raw_features, theft_type):
         # ── Extract & rename fields ──
         record_id = _first_of(attrs, FIELD_MAP["id_fields"], default=str(len(clean_records)))
         raw_date = _first_of(attrs, FIELD_MAP["date_field"], default="")
-        year = _first_of(attrs, FIELD_MAP["year_field"], default=datetime.utcnow().year)
+        year = _first_of(attrs, FIELD_MAP["year_field"], default=now_utc().year)
         raw_month = _first_of(attrs, FIELD_MAP["month_field"], default=1)
         day = _first_of(attrs, FIELD_MAP["day_field"], default=1)
         hour = _first_of(attrs, FIELD_MAP["hour_field"], default=12)
         neighbourhood = _first_of(attrs, FIELD_MAP["neighbourhood_fields"], default="Unknown")
         premise_type = _first_of(attrs, FIELD_MAP["premise_fields"], default="Unknown")
         status = _first_of(attrs, FIELD_MAP["status_fields"], default="Unknown")
+        division = _first_of(attrs, FIELD_MAP["division_fields"], default="")
+        location_type = _first_of(attrs, FIELD_MAP["location_fields"], default="")
 
         month = parse_month(raw_month)
         date_str = parse_date_string(raw_date, year, month, day)
 
-        # ── For auto thefts, double-check MCI_CATEGORY ──
-        if theft_type == "auto":
-            mci = attrs.get("MCI_CATEGORY", "")
-            if mci and "auto theft" not in str(mci).lower():
-                discarded_other += 1
+        # ── Enforce 6-month window ──
+        try:
+            record_year = int(year) if year else 0
+            record_month = int(month) if month else 0
+            # Compare year*100+month against cutoff
+            record_ym = record_year * 100 + record_month
+            cutoff_ym = cutoff_year * 100 + cutoff_month
+            if record_ym < cutoff_ym:
+                discarded_date += 1
                 continue
+        except (TypeError, ValueError):
+            pass  # keep records we can't date-check
 
         # ── Build clean record ──
         clean_records.append({
             "id": f"{theft_type}-{record_id}",
             "type": theft_type,
             "date": date_str,
-            "year": int(year) if year else datetime.utcnow().year,
+            "year": int(year) if year else now_utc().year,
             "month": month,
             "day": int(day) if day else 1,
             "hour": int(hour) if hour else 0,
@@ -401,7 +451,7 @@ def process_features(raw_features, theft_type):
             "status": str(status).strip(),
         })
 
-    print(f"  📊 Processed: {len(clean_records)} clean / {discarded_coords} bad coords / {discarded_other} wrong category")
+    print(f"  📊 Processed: {len(clean_records)} valid / {discarded_coords} bad coords / {discarded_date} outside window / {discarded_other} other")
     return clean_records
 
 # ──────────────────────────────────────────────
@@ -427,7 +477,7 @@ def main():
     print("╔══════════════════════════════════════════════════════════╗")
     print("║  Toronto Asset Safety Radar v2 — ETL Scraper            ║")
     print("╚══════════════════════════════════════════════════════════╝")
-    print(f"  Time:   {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  Time:   {now_utc().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"  Window: Last {TIME_WINDOW_MONTHS} months")
     print(f"  Output: {os.path.abspath(OUTPUT_DIR)}")
 

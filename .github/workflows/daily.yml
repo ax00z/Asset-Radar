@@ -1,100 +1,76 @@
-# ──────────────────────────────────────────────
-# Toronto Asset Safety Radar v2 — Daily Pipeline
-# ──────────────────────────────────────────────
-# This workflow runs every day at 09:00 EST (14:00 UTC).
-# It:
-#   1. Installs Python and Node.js
-#   2. Runs scrape.py to generate fresh JSON data
-#   3. Builds the React app (bundling the new JSON inside)
-#   4. Deploys the result to GitHub Pages
-# ──────────────────────────────────────────────
-
 name: Daily Scrape & Deploy
 
 on:
-  # ── Scheduled: every day at 09:00 EST (14:00 UTC) ──
   schedule:
+    # Run daily at 14:00 UTC (09:00 EST)
     - cron: '0 14 * * *'
-
-  # ── Manual trigger from GitHub UI ──
-  workflow_dispatch:
-
-  # ── Also run on pushes to main (for initial deployment) ──
   push:
     branches: [main]
+  workflow_dispatch:  # Allow manual triggering
 
-# Required for GitHub Pages deployment
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Only one deployment at a time
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   scrape-build-deploy:
     runs-on: ubuntu-latest
-
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      # ── 1. Checkout the repository ──
-      - name: 📥 Checkout code
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Setup Python (for scraper) ──
-      - name: 🐍 Setup Python
+      - name: 🐍 Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # ── 3. Setup Node.js (for React build) ──
-      - name: 📦 Setup Node.js
+      - name: 📊 Run scraper (ETL pipeline)
+        run: python scrape.py
+
+      - name: ✅ Verify data files exist
+        run: |
+          echo "=== Data files ==="
+          ls -la public/data/
+          echo ""
+          echo "Auto thefts file size:"
+          wc -c public/data/auto_thefts.json
+          echo "Bike thefts file size:"
+          wc -c public/data/bike_thefts.json
+          echo ""
+          echo "Auto thefts record count:"
+          python -c "import json; d=json.load(open('public/data/auto_thefts.json')); print(len(d))"
+          echo "Bike thefts record count:"
+          python -c "import json; d=json.load(open('public/data/bike_thefts.json')); print(len(d))"
+
+      - name: 📦 Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # ── 4. Run the scraper ──
-      - name: 🔍 Scrape Toronto Police data
-        run: python scrape.py
-
-      # ── 5. Verify data files were created ──
-      - name: ✅ Verify data output
-        run: |
-          echo "── Data files ──"
-          ls -lh public/data/
-          echo ""
-          echo "── Auto thefts (first 200 chars) ──"
-          head -c 200 public/data/auto_thefts.json || echo "⚠ File missing"
-          echo ""
-          echo "── Bike thefts (first 200 chars) ──"
-          head -c 200 public/data/bike_thefts.json || echo "⚠ File missing"
-
-      # ── 6. Install npm dependencies ──
-      - name: 📦 Install dependencies
+      - name: 📥 Install npm dependencies
         run: npm ci
 
-      # ── 7. Build the React app ──
-      # The build bundles the JSON files from public/data/ into the dist
-      - name: 🏗️ Build application
+      - name: 🏗️ Build frontend
         run: npm run build
 
-      # ── 8. Upload to Pages ──
       - name: 📄 Setup Pages
         uses: actions/configure-pages@v4
 
       - name: 📤 Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: './dist'
 
-      # ── 9. Deploy ──
       - name: 🚀 Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

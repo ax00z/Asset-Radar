@@ -443,11 +443,19 @@ export function TheftMap() {
       </div>
 
       {/* Crosshair center indicator */}
-      <div className="absolute top-3 left-3 bg-slate-800/80 backdrop-blur rounded-lg px-2 py-1 flex items-center gap-1 border border-slate-700/50">
-        <Crosshair className="w-3 h-3 text-slate-400" />
-        <span className="text-[10px] text-slate-400 font-mono">
-          {mapState.centerLat.toFixed(4)}, {mapState.centerLng.toFixed(4)}
-        </span>
+      <div className="absolute top-3 left-3 flex flex-col gap-1">
+        <div className="bg-slate-800/80 backdrop-blur rounded-lg px-2 py-1 flex items-center gap-1 border border-slate-700/50">
+          <Crosshair className="w-3 h-3 text-slate-400" />
+          <span className="text-[10px] text-slate-400 font-mono">
+            {mapState.centerLat.toFixed(4)}, {mapState.centerLng.toFixed(4)}
+          </span>
+        </div>
+        <div className="bg-slate-800/80 backdrop-blur rounded-lg px-2 py-1 flex items-center gap-1.5 border border-slate-700/50">
+          <span className="text-[10px] text-cyan-400">📊</span>
+          <span className="text-[10px] text-slate-400">
+            {filteredRecords.length.toLocaleString()} pts • Last 6 months
+          </span>
+        </div>
       </div>
 
       {/* Legend */}

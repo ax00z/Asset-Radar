@@ -10,7 +10,7 @@ export function StatsCards() {
     const autoCount = records.filter((r) => r.type === 'auto').length;
     const bikeCount = records.filter((r) => r.type === 'bike').length;
 
-    // Peak hour
+    // Peak hour from filtered records
     const hourCounts = new Map<number, number>();
     filteredRecords.forEach((r) => {
       hourCounts.set(r.hour, (hourCounts.get(r.hour) || 0) + 1);
@@ -24,7 +24,7 @@ export function StatsCards() {
       }
     });
 
-    // Hottest neighbourhood
+    // Hottest neighbourhood from filtered records
     const nhCounts = new Map<string, number>();
     filteredRecords.forEach((r) => {
       nhCounts.set(r.neighbourhood, (nhCounts.get(r.neighbourhood) || 0) + 1);
@@ -38,54 +38,51 @@ export function StatsCards() {
       }
     });
 
-    // Daily avg
+    // Daily avg from filtered records
     const days = new Set<string>();
-    filteredRecords.forEach((r) => days.add(`${r.year}-${r.month}-${r.day}`));
+    filteredRecords.forEach((r) => days.add(r.date));
     const dailyAvg = days.size > 0 ? (filteredRecords.length / days.size).toFixed(1) : '0';
 
-    return { autoCount, bikeCount, peakHour, hotspot, hotspotCount, dailyAvg, total: records.length };
+    return { autoCount, bikeCount, peakHour, peakCount, hotspot, hotspotCount, dailyAvg, total: records.length };
   }, [records, filteredRecords]);
 
   const cards = [
     {
-      label: 'Total Incidents',
+      label: 'Total (6 Months)',
       value: stats.total.toLocaleString(),
       icon: AlertTriangle,
-      color: 'from-red-500 to-orange-500',
       bgColor: 'bg-red-500/10',
       iconColor: 'text-red-400',
+      sub: `${stats.autoCount} auto + ${stats.bikeCount} bike`,
     },
     {
       label: 'Auto Thefts',
       value: stats.autoCount.toLocaleString(),
       icon: Car,
-      color: 'from-red-500 to-pink-500',
       bgColor: 'bg-red-500/10',
       iconColor: 'text-red-400',
-      sub: `${((stats.autoCount / Math.max(stats.total, 1)) * 100).toFixed(0)}%`,
+      sub: `${((stats.autoCount / Math.max(stats.total, 1)) * 100).toFixed(0)}% of total`,
     },
     {
       label: 'Bike Thefts',
       value: stats.bikeCount.toLocaleString(),
       icon: Bike,
-      color: 'from-blue-500 to-cyan-500',
       bgColor: 'bg-blue-500/10',
       iconColor: 'text-blue-400',
-      sub: `${((stats.bikeCount / Math.max(stats.total, 1)) * 100).toFixed(0)}%`,
+      sub: `${((stats.bikeCount / Math.max(stats.total, 1)) * 100).toFixed(0)}% of total`,
     },
     {
       label: 'Peak Hour',
       value: `${String(stats.peakHour).padStart(2, '0')}:00`,
       icon: Clock,
-      color: 'from-amber-500 to-yellow-500',
       bgColor: 'bg-amber-500/10',
       iconColor: 'text-amber-400',
+      sub: `${stats.peakCount} incidents`,
     },
     {
       label: 'Daily Average',
       value: stats.dailyAvg,
       icon: TrendingUp,
-      color: 'from-green-500 to-emerald-500',
       bgColor: 'bg-green-500/10',
       iconColor: 'text-green-400',
       sub: 'per day',
@@ -94,7 +91,6 @@ export function StatsCards() {
       label: '#1 Hotspot',
       value: stats.hotspot.length > 15 ? stats.hotspot.slice(0, 13) + '…' : stats.hotspot,
       icon: MapPin,
-      color: 'from-purple-500 to-violet-500',
       bgColor: 'bg-purple-500/10',
       iconColor: 'text-purple-400',
       sub: `${stats.hotspotCount} incidents`,

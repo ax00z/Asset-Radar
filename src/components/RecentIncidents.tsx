@@ -21,6 +21,11 @@ export function RecentIncidents() {
   const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
   const pageRecords = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
+  // Compute the 6-month window for display
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 6);
+  const windowStr = `${cutoff.toLocaleDateString('en-CA')} to ${new Date().toLocaleDateString('en-CA')}`;
+
   return (
     <div className="bg-slate-800/50 backdrop-blur border border-slate-700/30 rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/30">
@@ -28,6 +33,7 @@ export function RecentIncidents() {
           <List className="w-4 h-4 text-cyan-400" />
           <h3 className="text-sm font-semibold text-white">Recent Incidents</h3>
           <span className="text-[10px] text-slate-500">{sorted.length.toLocaleString()} total</span>
+          <span className="text-[9px] text-slate-600 hidden sm:inline">• {windowStr}</span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -63,9 +69,9 @@ export function RecentIncidents() {
             </tr>
           </thead>
           <tbody>
-            {pageRecords.map((r) => (
+            {pageRecords.map((r, idx) => (
               <tr
-                key={r.id}
+                key={`${r.id}-${page}-${idx}`}
                 onClick={() => setSelectedRecord(r)}
                 className="border-t border-slate-700/20 hover:bg-slate-700/30 cursor-pointer transition-colors"
               >
@@ -80,7 +86,7 @@ export function RecentIncidents() {
                   </span>
                 </td>
                 <td className="px-4 py-2 text-xs text-slate-300 font-mono">
-                  {r.year}-{String(r.month).padStart(2, '0')}-{String(r.day).padStart(2, '0')}
+                  {r.date}
                 </td>
                 <td className="px-4 py-2 text-xs text-slate-400 font-mono">
                   {String(r.hour).padStart(2, '0')}:00

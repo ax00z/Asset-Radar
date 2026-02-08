@@ -48,7 +48,7 @@ export function Header() {
                     <span className={dataSource === 'static' ? 'text-blue-400' : 'text-amber-400'}>
                       {dataSource === 'static' ? 'Cached' : 'Live API'}
                     </span>
-                    <span className="text-slate-500">• {records.length.toLocaleString()} records</span>
+                    <span className="text-slate-500">• {records.length.toLocaleString()} records (6mo)</span>
                   </span>
                 )}
               </div>
